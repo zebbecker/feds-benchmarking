@@ -8,6 +8,7 @@ import sys
 import logging
 import pandas as pd
 import geopandas as gpd
+import numpy as np
 import fsspec
 import boto3
 import geopandas as gpd
@@ -15,13 +16,20 @@ import datetime as dt
 import logging
 import csv
 import rasterio
+import rioxarray
 import matplotlib.pyplot as plt
+import pyproj
 
 from tqdm import tqdm
 from pyproj import CRS
 from owslib.ogcapi.features import Features
 from datetime import datetime, timedelta
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, EndpointConnectionError
+from rasterio.mask import mask
+from rasterio.warp import reproject, calculate_default_transform
+from rasterio.enums import Resampling
+from shapely.ops import transform
+from geopandas import GeoSeries
 
 # class imports
 import Utilities
@@ -426,6 +434,151 @@ class OutputCalculation():
         print('DATE MATCHING COMPLETE')
         return matches
     
+        
+    # TIF READING AND PROCESSING
+    
+    # for outside cell acess 
+    def tif_analysis(self, tif_path: str, req_calc: str, date_restrict = None):
+            """ given output obj with available feds + ref polygons
+                user specifies tif path (tif_path) and req_calcs (str that is
+                MEAN, MEDIAN, UNIQUE)
+
+            """
+            # target_crs
+            dst_crs = self._feds_input._crs
+
+            # input checks
+            valid_calc_choices = ["MEAN", "MEDIAN", "UNIQUE"]
+
+            assert req_calc in valid_calc_choices, f"Provided req_calc argument is not valid, please select a choice from the following: {valid_calc_choices}"
+
+            # assign main polygons
+            feds_polygons = self._feds_input.polygons
+            ref_polygons =self._ref_input.polygons
+            indices = self._calculations['index_pairs']
+
+            # correspond to indices/pairs
+            mass_results = []
+            
+            # rioaxarry attempt
+            xds = rioxarray.open_rasterio(tif_path)
+            xds_lonlat = xds.rio.reproject(dst_crs)
+            
+            for pair in indices:
+
+                index1, index2 = pair
+                if index2 is None:
+                    continue
+
+                feds_inst = feds_polygons[feds_polygons['index'] == index1]
+                ref_inst = ref_polygons[ref_polygons['index'] == index2]
+
+                # given an int time restriction, eliminate pairs not in bounds 
+                if date_restrict is not None:
+                    assert type(date_restrict) is int, "date_restrict must be int, as in number of days permitted for timestamp difference"
+                    # assert of datetime type 
+                    feds_time = datetime.strptime(feds_inst.t.values[0], "%Y-%m-%dT%H:%M:%S")
+                    is_within_time_given = OutputCalculation.get_nearest_by_date(ref_inst, feds_time, date_restrict)
+                    if  is_within_time_given.empty or is_within_time_given is None:
+                        continue
+
+                # exceeding zone for feds: feds - ref == feds exceed amount
+                diff_area = feds_inst.symmetric_difference(ref_inst, align=False)
+                # generate masked out tif
+                masked_tif = xds_lonlat.rio.clip(diff_area)
+                
+                if masked_tif is not None:
+                    if req_calc == "MEAN":
+                        avg_val = np.nanmean(masked_tif)
+                        mass_results.append(avg_val)
+                    elif req_calc == "MEDIAN":
+                        median_val = np.nanmedian(masked_tif)
+                        mass_results.append(median_val)
+                    else:
+                        unique_vals = np.unique(masked_tif)
+                        mass_results.append([unique_vals])
+            
+            # open and generate mask tif
+            """
+            with rasterio.open(tif_path) as src:
+                # masked_tif, _ = mask(src, diff_area.geometry, crop=True)
+                transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
+                kwargs = src.meta.copy()
+                kwargs.update({
+                    'crs': dst_crs,
+                    'transform': transform,
+                    'width': width,
+                    'height': height
+                })
+
+                # gead and reproject the GeoTIFF data
+                reprojected_src = src.read(1, out_shape=(height, width), resampling=Resampling.nearest)
+
+                for pair in indices:
+
+                    index1, index2 = pair
+                    if index2 is None:
+                        continue
+
+                    feds_inst = feds_polygons[feds_polygons['index'] == index1]
+                    ref_inst = ref_polygons[ref_polygons['index'] == index2]
+
+                    # given an int time restriction, eliminate pairs not in bounds 
+                    if date_restrict is not None:
+                        assert type(date_restrict) is int, "date_restrict must be int, as in number of days permitted for timestamp difference"
+                        # assert of datetime type 
+                        feds_time = datetime.strptime(feds_inst.t.values[0], "%Y-%m-%dT%H:%M:%S")
+                        is_within_time_given = OutputCalculation.get_nearest_by_date(ref_inst, feds_time, date_restrict)
+                        if  is_within_time_given.empty or is_within_time_given is None:
+                            continue
+
+                    # exceeding zone for feds: feds - ref == feds exceed amount
+                    # diff_area = gpd.overlay(feds_inst, ref_inst, how='symmetric_difference')
+                    diff_area = feds_inst.symmetric_difference(ref_inst, align=False)
+                    # gen mask
+                    masked_tif, _ = mask(reprojected_src, diff_area.geometry, crop=True)
+
+                    # append requested val generated from usr req
+                    if masked_tif is not None:
+                        if req_calc == "MEAN":
+                            avg_val = np.nanmean(masked_tif)
+                            mass_results.append(avg_val)
+                        elif req_calc == "MEDIAN":
+                            median_val = np.nanmedian(masked_tif)
+                            mass_results.append(median_val)
+                        else:
+                            unique_vals = np.unique(masked_tif)
+                            mass_results.append([unique_vals])
+            """
+
+            return mass_results
+        
+    def transform_polygon(self, geoseries):
+        # Define EPSG:3857 (Web Mercator) and EPSG:5070 (NAD83 / Conus Albers) CRS
+        mercator_crs = pyproj.CRS("EPSG:3857")
+        nad83_crs = pyproj.CRS("EPSG:5070")
+
+        # Create transformer
+        transformer = pyproj.Transformer.from_crs(mercator_crs, nad83_crs, always_xy=True)
+
+        # Define transformation function
+        def transform_func(x, y, z=None):
+            lon, lat = transformer.transform(x, y)
+            return lon, lat
+        
+        # Transform polygon geometry
+        # transformed_polygon = transform(transform_func, polygon)
+        
+        transformed_polygons = []
+        
+        for polygon in geoseries:
+            transformed_polygon = transform(transform_func, polygon)
+            transformed_polygons.append(transformed_polygon)
+
+        transformed_geoseries = GeoSeries(transformed_polygons)
+        
+        return transformed_geoseries
+
     def write_to_csv(self):
         """ take result calculation columns and output into csv format
             take note of instance vars:
@@ -460,6 +613,17 @@ class OutputCalculation():
         feds_polygons = self._feds_input.polygons
         ref_polygons = self._ref_input.polygons
         
+        # exp: hardcoded tif path
+        tif_path = "/projects/CONUS-Down/LF2020_SlpD_220_CONUS/Tif/LC20_SlpD_220.tif"
+        
+        # "/projects/shared-buckets/gsfc_landslides/LANDFIRE/LF2022_FBFM40_220_CONUS/Tif/LC22_F40_220.tif"
+        
+        print("VERBOSE: OPEN RASTER")
+        xds = rioxarray.open_rasterio(tif_path)
+        # xds_lonlat = xds.rio.reproject(self._feds_input._crs)
+        print("VERBOSE: RASTER CRS")
+        xds_crs = xds.rio.crs
+        
         with open(file_name, 'w', newline='') as csvfile:
             # erase prev content 
             csvfile.truncate()
@@ -471,6 +635,9 @@ class OutputCalculation():
                           'incident_name', # need to condition if available
                           'feds_timestamp',
                           'ref_timestamp',
+                          'tif_mean',
+                          'tif_median',
+                          'tif_unique',
                           'abs(feds-ref)_days',
                           'ratio', 
                           'accuracy', 
@@ -482,6 +649,22 @@ class OutputCalculation():
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             num_rows = len(calculations['index_pairs']) 
+
+            # with rasterio.open(tif_path) as src:
+                # masked_tif, _ = mask(src, diff_area.geometry, crop=True)
+                
+            # transform, width, height = calculate_default_transform(src.crs, self._feds_input._crs, src.width, src.height, *src.bounds)
+            # kwargs = src.meta.copy()
+            # kwargs.update({
+            #     'crs': self._feds_input._crs,
+            #     'transform': transform,
+            #     'width': width,
+            #     'height': height
+            # })
+
+            # gead and reproject the GeoTIFF data
+            # reprojected_src = src.read(1, out_shape=(height, width), resampling=Resampling.nearest)
+            
 
             for i in range(num_rows):
                 # skip None values for write in
@@ -497,7 +680,7 @@ class OutputCalculation():
                     ]
                 ):
                     continue
-                    
+
                 else: 
                     # poly extraction
                     feds_poly = feds_polygons[feds_polygons['index'] == calculations['index_pairs'][i][0]]
@@ -505,19 +688,19 @@ class OutputCalculation():
                     # timestamp extract
                     feds_time = feds_poly.t.values[0]
                     ref_time = ref_poly['DATE_CUR_STAMP'].values[0]
-                    
+
                     # print(f"DEBUG type for feds time {type(feds_time)}")
-                    
+
                     # convert for abso
                     feds_time_int = datetime.strptime(feds_time, "%Y-%m-%dT%H:%M:%S")
                     ref_time_str = str(ref_time)
                     ref_format = "%Y-%m-%dT%H:%M:%S.%f" + ref_time_str[-3:]
                     ref_time_int = datetime.strptime(ref_time_str, ref_format)
-                    
+
                     # ref_time_int = ref_time.astype(datetime) # datetime.strptime(ref_time, "%Y-%m-%dT%H:%M:%S")
                     # abso difference in days
                     abs_day_diff = abs((feds_time_int - ref_time_int).days)
-                    
+
                     # UFuncTypeError: ufunc 'subtract' cannot use operands with types dtype('<U19') and dtype('<M8[ns]')
                     # suspect name match - use known pre-definedd col labels
                     if 'INCIDENT' in ref_poly.columns:
@@ -530,7 +713,66 @@ class OutputCalculation():
                         incident_name = ref_poly['incidentname'].values[0]
                     else:
                         incident_name = ""
+
+                    ####### TIF DATA ########
+
+                    diff_area = feds_poly.symmetric_difference(ref_poly, align=False)
+                    # reproject to tif crs 
+                    print("VERBOSE: PROJECT DIFF_AREA")
+                    print(f"VERBOSE: OLD CRS: {diff_area.crs}")
                     
+                    ## PLOT ## 
+                    fig, ax = plt.subplots(figsize=(15, 15))
+                    
+                    # plot tif bounds
+                    bounds = xds.rio.bounds()
+                    minx, miny, maxx, maxy = bounds
+                    rect = plt.Rectangle((minx, miny), maxx - minx, maxy - miny, linewidth=1, edgecolor='blue', facecolor='none', label='Raster Bounds')
+                    ax.add_patch(rect)
+
+                    feds_plot = diff_area.plot(ax=ax, color="red",edgecolor="black", linewidth=10, label="FEDS Fire Estimate")
+                    
+                    # diff = self.transform_polygon(diff_area)
+                    diff = diff_area.to_crs(xds_crs)
+                    # diff = diff_area.to_crs(4269)
+                    
+                    ref_plot = diff.plot(ax=ax, color="gold", edgecolor="black", linewidth=10, hatch='\\', alpha=0.7, label="Reference Nearest Date + Intersection")
+                    ax.set_title("PROJECTION VISUAL", fontsize=17)
+                    ax.set_xlabel("Longitude", fontsize=14)
+                    ax.set_ylabel("Latitude", fontsize=14)
+                    plt.grid(True)
+                    plt.show()
+                    
+                    ## END PLOT ## 
+                    
+                    print(f"VERBOSE: NEW CRS: {diff.crs}")
+                    print(f"VERBOSE: TIF CRS: {xds_crs}")
+                    
+                    # gen mask
+                    # OLD MASK
+                    print("VERBOSE: MASK TIF")
+                    # masked_tif = xds.rio.clip(diff_area)
+                    
+                    minx, miny, maxx, maxy = diff.total_bounds
+                    
+                    print('VERBOSE: GEOM BOUNDS')
+                    print(minx, miny, maxx, maxy)
+                    
+                    print('VERBOSE: TIF BOUNDS')
+                    print(xds.rio.bounds())
+                    masked_tif = xds.sel(x=slice(minx, maxx), y=slice(miny, maxy))
+                    
+                    # append requested val generated from usr req
+                    assert(masked_tif is not None)
+
+                    # calculations 
+                    print("VERBOSE: CALCULATION EXTRACTION")
+                    mean_tif = np.nanmean(masked_tif)
+                    median_tif = np.nanmedian(masked_tif)
+                    unique_vals = np.unique(masked_tif)
+
+                    ##############################
+
                     row_data = {
                         'feds_index': calculations['index_pairs'][i][0],
                         'feds_polygon': self._feds_input._polygons.loc[calculations['index_pairs'][i][0]]['geometry'].wkt,
@@ -539,6 +781,9 @@ class OutputCalculation():
                         'incident_name': incident_name,
                         'feds_timestamp': feds_time,
                         'ref_timestamp': ref_time,
+                        'tif_mean': mean_tif,
+                        'tif_median': median_tif,
+                        'tif_unique': unique_vals.tolist(),
                         'abs(feds-ref)_days': abs_day_diff,
                         'ratio': calculations['ratio'][i],
                         'accuracy': calculations['accuracy'][i],
@@ -552,84 +797,6 @@ class OutputCalculation():
         
         print("\n")
         print(f"CSV output complete! Check file {file_name} for results. NOTE: None result rows were excluded.")
-        
-    # TIF READING AND PROCESSING
-    
-    def tif_analysis(self, tif_path: str, req_calc: str, date_restrict = None):
-            """ given output obj with available feds + ref polygons
-                user specifies tif path (tif_path) and req_calcs (str that is
-                MEAN, MEDIAN, UNIQUE)
-
-            """
-            # target_crs
-            dst_crs = self._feds_input._crs
-
-            # input checks
-            valid_calc_choices = ["MEAN", "MEDIAN", "UNIQUE"]
-
-            assert req_calc in valid_calc_choices, f"Provided req_calc argument is not valid, please select a choice from the following: {valid_calc_choices}"
-
-            # assign main polygons
-            feds_polygons = self._feds_input.polygons
-            ref_polygons =self._ref_input.polygons
-            indices = self._calculations['index_pairs']
-
-            # correspond to indices/pairs
-            mass_results = []
-
-            for pair in indices:
-
-                index1, index2 = pair
-                if index2 is None:
-                    continue
-
-                feds_inst = feds_polygons[feds_polygons['index'] == index1]
-                ref_inst = ref_polygons[ref_polygons['index'] == index2]
-
-                # given an int time restriction, eliminate pairs not in bounds 
-                if date_restrict is not None:
-                    assert type(date_restrict) is int, "date_restrict must be int, as in number of days permitted for timestamp difference"
-                    # assert of datetime type 
-                    feds_time = datetime.strptime(feds_inst.t.values[0], "%Y-%m-%dT%H:%M:%S")
-                    is_within_time_given = OutputCalculation.get_nearest_by_date(ref_inst, feds_time, date_restrict)
-                    if  is_within_time_given.empty or is_within_time_given is None:
-                        continue
-
-                # exceeding zone for feds: feds - ref == feds exceed amount
-                # diff_area = gpd.overlay(feds_inst, ref_inst, how='symmetric_difference')
-                diff_area = feds_inst.symmetric_difference(ref_inst, align=False)
-
-                # open and generate mask tif
-                with rasterio.open(tif_path) as src:
-                    # masked_tif, _ = mask(src, diff_area.geometry, crop=True)
-                    transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
-                    kwargs = src.meta.copy()
-                    kwargs.update({
-                        'crs': dst_crs,
-                        'transform': transform,
-                        'width': width,
-                        'height': height
-                    })
-
-                    # gead and reproject the GeoTIFF data
-                    reprojected_src = src.read(1, out_shape=(height, width), resampling=Resampling.nearest)
-
-                    # gen mask
-                    masked_tif, _ = mask(reprojected_src, diff_area.geometry, crop=True)
-
-                # append requested val generated from usr req
-                if masked_tif is not None:
-                    if req_calc == "MEAN":
-                        avg_val = np.nanmean(masked_tif)
-                        mass_results.append(avg_val)
-                    elif req_calc == "MEDIAN":
-                        median_val = np.nanmedian(masked_tif)
-                        mass_results.append(median_val)
-                    else:
-                        unique_vals = np.unique(masked_tif)
-                        mass_results.append([unique_vals])
-
-            return mass_results
     
     #### WARNING: EXPERIMENTAL METHODS BELOW, NOT CONFORMING TO OOP DESIGN ###   
     
