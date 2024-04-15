@@ -190,9 +190,12 @@ class InputFEDS():
         
         # set/to crs based on usr input
         try:
-            df = df.set_crs(self._crs)
+            # TRY: set to 9311 and then convert
+            df = df.set_crs(4326)
+            
         except Exception as e:
             logging.error(f'Encountered {e}, no FEDS geom found. Retry with different dates / region')
+        # df = df.to_crs(5070)
         df = df.to_crs(self._crs)
         
         # apply finalized fire perim: take highest indices of duplicate fire ids

@@ -16,7 +16,7 @@ import datetime as dt
 import logging
 import csv
 import rasterio
-import rioxarray
+import rioxarray as rio
 import matplotlib.pyplot as plt
 import pyproj
 
@@ -461,7 +461,7 @@ class OutputCalculation():
             mass_results = []
             
             # rioaxarry attempt
-            xds = rioxarray.open_rasterio(tif_path)
+            xds = rio.open_rasterio(tif_path)
             xds_lonlat = xds.rio.reproject(dst_crs)
             
             for pair in indices:
@@ -614,15 +614,12 @@ class OutputCalculation():
         ref_polygons = self._ref_input.polygons
         
         # exp: hardcoded tif path
-        tif_path = "/projects/CONUS-Down/LF2020_SlpD_220_CONUS/Tif/LC20_SlpD_220.tif"
+        tif_path = '/projects/shared-buckets/gsfc_landslides/LANDFIRE/LF2022_FBFM40_220_CONUS/Tif/LC22_F40_220.tif'
         
+        # "/projects/CONUS-Down/LF2020_SlpD_220_CONUS/Tif/LC20_SlpD_220.tif"
         # "/projects/shared-buckets/gsfc_landslides/LANDFIRE/LF2022_FBFM40_220_CONUS/Tif/LC22_F40_220.tif"
         
-        print("VERBOSE: OPEN RASTER")
-        xds = rioxarray.open_rasterio(tif_path)
-        # xds_lonlat = xds.rio.reproject(self._feds_input._crs)
-        print("VERBOSE: RASTER CRS")
-        xds_crs = xds.rio.crs
+        evt20 = rio.open_rasterio(tif_path)
         
         with open(file_name, 'w', newline='') as csvfile:
             # erase prev content 
@@ -650,22 +647,6 @@ class OutputCalculation():
             writer.writeheader()
             num_rows = len(calculations['index_pairs']) 
 
-            # with rasterio.open(tif_path) as src:
-                # masked_tif, _ = mask(src, diff_area.geometry, crop=True)
-                
-            # transform, width, height = calculate_default_transform(src.crs, self._feds_input._crs, src.width, src.height, *src.bounds)
-            # kwargs = src.meta.copy()
-            # kwargs.update({
-            #     'crs': self._feds_input._crs,
-            #     'transform': transform,
-            #     'width': width,
-            #     'height': height
-            # })
-
-            # gead and reproject the GeoTIFF data
-            # reprojected_src = src.read(1, out_shape=(height, width), resampling=Resampling.nearest)
-            
-
             for i in range(num_rows):
                 # skip None values for write in
                 if all( value is None for value in 
@@ -683,13 +664,15 @@ class OutputCalculation():
 
                 else: 
                     # poly extraction
+                    print(f'VERBOSE: BOUNDS OF ALL FEDS SET: {feds_polygons.total_bounds}')
+                    
                     feds_poly = feds_polygons[feds_polygons['index'] == calculations['index_pairs'][i][0]]
                     ref_poly = ref_polygons[ref_polygons['index'] == calculations['index_pairs'][i][1]]
+                    print(f'VERBOSE: BOUNDS OF SINGE POLY: {feds_poly.geometry.bounds}')
+                    
                     # timestamp extract
                     feds_time = feds_poly.t.values[0]
                     ref_time = ref_poly['DATE_CUR_STAMP'].values[0]
-
-                    # print(f"DEBUG type for feds time {type(feds_time)}")
 
                     # convert for abso
                     feds_time_int = datetime.strptime(feds_time, "%Y-%m-%dT%H:%M:%S")
@@ -717,59 +700,22 @@ class OutputCalculation():
                     ####### TIF DATA ########
 
                     diff_area = feds_poly.symmetric_difference(ref_poly, align=False)
-                    # reproject to tif crs 
-                    print("VERBOSE: PROJECT DIFF_AREA")
-                    print(f"VERBOSE: OLD CRS: {diff_area.crs}")
+                    minx, miny, maxx, maxy = diff_area.to_crs(evt20.rio.crs).total_bounds
                     
-                    ## PLOT ## 
-                    fig, ax = plt.subplots(figsize=(15, 15))
-                    
-                    # plot tif bounds
-                    bounds = xds.rio.bounds()
-                    minx, miny, maxx, maxy = bounds
-                    rect = plt.Rectangle((minx, miny), maxx - minx, maxy - miny, linewidth=1, edgecolor='blue', facecolor='none', label='Raster Bounds')
-                    ax.add_patch(rect)
-
-                    feds_plot = diff_area.plot(ax=ax, color="red",edgecolor="black", linewidth=10, label="FEDS Fire Estimate")
-                    
-                    # diff = self.transform_polygon(diff_area)
-                    diff = diff_area.to_crs(xds_crs)
-                    # diff = diff_area.to_crs(4269)
-                    
-                    ref_plot = diff.plot(ax=ax, color="gold", edgecolor="black", linewidth=10, hatch='\\', alpha=0.7, label="Reference Nearest Date + Intersection")
-                    ax.set_title("PROJECTION VISUAL", fontsize=17)
-                    ax.set_xlabel("Longitude", fontsize=14)
-                    ax.set_ylabel("Latitude", fontsize=14)
-                    plt.grid(True)
-                    plt.show()
-                    
-                    ## END PLOT ## 
-                    
-                    print(f"VERBOSE: NEW CRS: {diff.crs}")
-                    print(f"VERBOSE: TIF CRS: {xds_crs}")
-                    
-                    # gen mask
-                    # OLD MASK
-                    print("VERBOSE: MASK TIF")
-                    # masked_tif = xds.rio.clip(diff_area)
-                    
-                    minx, miny, maxx, maxy = diff.total_bounds
-                    
-                    print('VERBOSE: GEOM BOUNDS')
+                    print('VERBOSE: NEW DIFF_AREA BOUNDS')
                     print(minx, miny, maxx, maxy)
                     
                     print('VERBOSE: TIF BOUNDS')
-                    print(xds.rio.bounds())
-                    masked_tif = xds.sel(x=slice(minx, maxx), y=slice(miny, maxy))
+                    print(evt20.rio.bounds())
                     
-                    # append requested val generated from usr req
-                    assert(masked_tif is not None)
+                    lf_subset = evt20.sel(x=slice(minx,maxx), y=slice(maxy,miny)).squeeze()
 
                     # calculations 
                     print("VERBOSE: CALCULATION EXTRACTION")
-                    mean_tif = np.nanmean(masked_tif)
-                    median_tif = np.nanmedian(masked_tif)
-                    unique_vals = np.unique(masked_tif)
+                    vals_use = lf_subset.values
+                    mean_tif = np.mean(vals_use)
+                    median_tif = np.median(vals_use)
+                    unique_vals = np.unique(vals_use)
 
                     ##############################
 

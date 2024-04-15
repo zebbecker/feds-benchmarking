@@ -221,8 +221,8 @@ class InputReference():
         # manually move filtering due to bug
         df_date = datetime.datetime.fromisoformat(self._usr_start)
         df_year = df_date.year
-        df = gdf.set_crs(self._crs, allow_override=True)
-        df = gdf.to_crs(self._crs)
+        df = gdf.set_crs(4326, allow_override=True)
+        df = df.to_crs(self._crs)
         
         # condition based on custom time col
         # TODO: improve handling by making a special dict mapping for arcgis cases
@@ -275,7 +275,8 @@ class InputReference():
 
             gdf = gdf[gdf.geometry != None]
             gdf = gdf[gdf.GIS_ACRES != 0]
-            gdf = gdf.set_crs(self._crs, allow_override=True)
+            gdf = gdf.set_crs(4236, allow_override=True)
+            gdf = gdf.to_crs(self._crs)
 
             assert gdf.shape[0] != 0, "Invalid shape identified in ArcGIS API read"
 
@@ -298,8 +299,10 @@ class InputReference():
             # outcast non matches in year self._usr_start
             gdf = gdf[gdf.DATE_CUR_STAMP.dt.year == int(self._usr_start[:4])]
             
-            gdf = gdf.set_crs(self._crs, allow_override=True)
-            # gdf = gdf.to_crs(self._crs)
+            gdf = gdf.set_crs(4326, allow_override=True)
+            # gdf = gdf.to_crs(5070)
+            gdf = gdf.to_crs(self._crs)
+            
         
         gdf['index'] = gdf.index
         
@@ -335,7 +338,7 @@ class InputReference():
         df_year = df_date.year
         
         # crs management
-        df = gdf.set_crs(self._crs, allow_override=True)
+        gdf = gdf.set_crs(4326, allow_override=True)
         df = gdf.to_crs(self._crs)
         
         # geom validity
@@ -386,7 +389,8 @@ class InputReference():
         # actions as docstring specifies
         df = df[df.geometry != None]
         df = df[df.GIS_ACRES != 0]
-        df = df.set_crs(self._crs, allow_override=True)    
+        df = df.set_crs(4326, allow_override=True)
+        df = df.to_crs(self._crs)
         
         if df.shape[0] == 0:
             assert 1 == 0, "Not possible"
@@ -413,7 +417,8 @@ class InputReference():
         """
         df_date = datetime.fromisoformat(self._usr_start)
         df_year = df_date.year
-        df = df.set_crs(self._crs, allow_override=True)
+        df = df.set_crs(4326, allow_override=True)
+        df = df.to_crs(self._crs)
         
         df['DATE_NOT_NONE'] = df.apply(lambda row : getattr(row, 'poly_PolygonDateTime') is not None, axis = 1)
         df = df[df.DATE_NOT_NONE == True]
@@ -433,7 +438,8 @@ class InputReference():
         
         df_date = datetime.fromisoformat(self._usr_start)
         df_year = df_date.year
-        df = df.set_crs(self._crs, allow_override=True)
+        df = df.set_crs(4326, allow_override=True)
+        df = df.to_crs(self._crs)
         
         df['DATE_NOT_NONE'] = df.apply(lambda row : getattr(row, 'perimeterdatetime') is not None, axis = 1)
         df = df[df.DATE_NOT_NONE == True]
