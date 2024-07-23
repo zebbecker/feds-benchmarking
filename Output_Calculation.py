@@ -5,6 +5,7 @@ Output_Calculation Class
 
 import glob
 import sys
+import os
 import logging
 import pandas as pd
 import geopandas as gpd
@@ -612,6 +613,8 @@ class OutputCalculation():
         # fetch polygons to extract meta data
         feds_polygons = self._feds_input.polygons
         ref_polygons = self._ref_input.polygons
+
+        os.makedirs(os.path.dirname(file_name), exist_ok=True)
         
         # exp: hardcoded tif path
         tif_path = '/projects/shared-buckets/gsfc_landslides/LANDFIRE/LF2022_FBFM40_220_CONUS/Tif/LC22_F40_220.tif'
