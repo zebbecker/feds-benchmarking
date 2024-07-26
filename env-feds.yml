@@ -66,8 +66,9 @@ dependencies:
   - freexl=1.0.6=h7f98852_0
   - fsspec=2022.8.2=pyhd8ed1ab_0
   - gdal=3.5.1=py310hb7951cf_5
-  - geopandas=0.11.1=pyhd8ed1ab_0
-  - geopandas-base=0.11.1=pyha770c72_0
+  - geopandas=0.14.2
+  # - geopandas=0.11.1=pyhd8ed1ab_0
+  # - geopandas-base=0.11.1=pyha770c72_0
   - geos=3.11.0=h27087fc_0
   - geotiff=1.7.1=h4fc65e6_3
   - gettext=0.21.0=hf68c758_0
