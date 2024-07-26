@@ -1,0 +1,5 @@
+.gitignore 
+data/ 
+results/ 
+*ipynb_checkpoints* 
+*__pycache__*
