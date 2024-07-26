@@ -116,23 +116,15 @@ class InputFEDS():
     def set_hard_dataset(self):
         """ open local allfires file; load and filter based on user params. 
             Expects self._collection to be a filepath to an allfires.parq file. 
-            Expects self._usr_start and stop to be parseable datetime strings (@TODO might not be actually) 
+            Expects self._usr_bbox in format ["xmin", "ymin", "xmax", "ymax"] w/ CRS 4326
         """
-        debug = True
-        
-        # @TODO update documentation to explain: 
-        # if acess type=local, title can be anything, collection needs to be 
-        # a full filepath to a specific allfires.parq file
-        # User bbox expected in format xmin, ymin, xmax, ymax w/ CRS 4326
 
-        # Requires absolute filepath in self._collection 
         df = gpd.read_parquet(self._collection)
-        # df['index'] = df.index
+
         df['t'] = df.index.get_level_values('t') 
         df['fireID'] = df.index.get_level_values('fireID') 
 
-        if debug: 
-            print(f"Read file. {len(df)} rows")
+        print(f"Finished reading file. {len(df)} rows read.")
 
         if df.empty:
             raise ValueError("INPUTFEDS: No FEDS results found. Please re-try with different date range/bbox region \
@@ -143,48 +135,41 @@ class InputFEDS():
         
         # filter by time 
         df = df[(df['t'] >= start) & (df['t'] <= stop)]
-
-        if debug:
-            print(f"Filtered by time. {len(df)} rows.")
-
+        print(f"After filtering by time, {len(df)} rows remaining.")
         
         # filter by bounding box 
         # assumes that usr_bbox is input as ["xmin", "ymin", "xmax", "ymax"] using CRS 4326
-        bbox = [float(n) for n in self._usr_bbox] # assure strings -> floats
+        bbox = [float(n) for n in self._usr_bbox] # assure strings get converted to floats
         bbox = gpd.GeoDataFrame([0], geometry=[box(*bbox)], crs="EPSG:4326") # unpack bbox list into args 
         bbox = bbox.to_crs(df.crs) 
 
         df = df[df.geometry.within(bbox.geometry[0])]
- 
-        if debug:
-            print(f"Filtered by bbox. {len(df)} rows.")
 
+        print(f"After filtering by bounding box, {len(df)} rows remaining.") 
+
+        # Should this be based on mergeID instead of fireID?  
         if self._apply_finalfire:
-            # For duplicate fires (based on mergeID or fireID?), 
-            # keep only the most recent perimeter. 
-            # assumes MultiIndex of fireID, t.
+            # For duplicate fires keep only the most recent perimeter. 
+            # Assumes MultiIndex of (fireID, t). 
             sorted_gdf = df.sort_index(level=['fireID', 't'], ascending=[True, False])
-            # sorted_gdf['fireID'] = sorted_gdf.index.get_level_values('fireID') 
             df = sorted_gdf.drop_duplicates(subset='fireID', keep='first')
 
-        if debug:
-            print(f"Dropped all but final fires. {len(df)} rows")
+        print(f"After dropping all but final fires, {len(df)} rows remaining.")
 
-        if debug:
-            print(f"Current CRS: {df.crs.name} \n Reprojecting to: {self._crs}")
+        print(f"Current CRS: {df.crs.name} \nReprojecting to: {self._crs}")
             
         df = df.to_crs(self._crs) 
-        if debug:
-            print("Converted crs." )
+ 
+        print("Converted crs." )
 
-
-        # convert to match API results 
+        # 't' expected as string in OutputCalculation, so convert from timestamp
         # t (timestamp) -> str '2019-07-01T00:00:00'
         df['t'] = df['t'].dt.strftime('%Y-%m-%dT%H:%M:%S')
-        
+
+        # Numeric index expected in OutputCalculation, drop MultiIndex
         df = df.reset_index(drop=True)
         
-        # set as needed for access in Output_Calculation 
+        # Needed for access in OutputCalculation 
         df['index'] = df.index
         df['geometry'] = df.hull
    

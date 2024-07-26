@@ -61,8 +61,8 @@ This section describes inputs for FEDS and reference datasets and acceptable val
             - VEDA Dashboard View: https://www.earthdata.nasa.gov/dashboard/data-catalog/fire
 
 - `collection`: 
-    - If using a predefined api dataset, choose a corresponding collection, otherwise choose `none` if using a custom local input
-    - Implemented:
+    - If using a predefined api dataset, choose a corresponding collection. Otherwise, input the full filepath to a FEDS Allfires parquet file on your filesystem to use a custom local input. 
+    - Implemented for api access:
         - Corresponding title: `"firenrt"`
             - `"public.eis_fire_lf_perimeter_archive"`: Perimeter of cumulative fire-area, from fires over 5 km^2 in the Western United States. Every fire perimeter from 2018-2021.
             - `'public.eis_fire_lf_perimeter_nrt'`: Perimeter of cumulative fire-area, from fires over 5 km^2. Every fire perimeter from current year to date.
@@ -83,12 +83,14 @@ This section describes inputs for FEDS and reference datasets and acceptable val
             - The VEDA API is an open-source collection of datasets which includes the FEDS fire perimeter dataset. Select this option for the following titles:
             - `"firenrt"`
             - For more information, see documentation: https://nasa-impact.github.io/veda-docs/
+        - `local`:
+            - Read an Allfires parquet file from local filesystem. This is an experimental feature. 
 - `limit`: 
-    - Amount of features to consider for FEDS API access; warning appears if it misses any entries. Recommended value is 9000, the API limit maximum.
+    - Amount of features to consider for FEDS API access; warning appears if it misses any entries. Recommended value is 9000, the API limit maximum. Unused for local access. 
 - `filter`: 
-    - `False` or a valid query that compiles with data set e.g. `"farea>5 AND duration>2"`; invalid queries will result in error
+    - `False` or a valid query that compiles with data set e.g. `"farea>5 AND duration>2"`; invalid queries will result in error. Not implemented for local access; only available for api sources. 
 - `apply_final_fire`: 
-    - For `"firenrt`"  set this to `True` if you want the only the latest fireID to be taken per unique FireID, set `False` for other datasets 
+    - For `"firenrt`" and local datasets set this to `True` if you want the only the latest fireID to be taken per unique FireID, set `False` for other datasets 
 
 ### Reference Input Settings
 
@@ -196,7 +198,7 @@ Inputs shared between FEDS and Reference
 - `crs`
     - Type `str`, coordinate reference system of the program, entered as a str of the number e.g. ``"3857"` representing EPSG:3857
 - `search bbox`: 
-    - Geographic bounding box for the FEDS dataset query, formatted as: [top left longitude, top left latitude, bottom right longitude, bottom righ latitude] e.g. US bounding box = `["-125.0", "24.396308", "-66.93457", "49.384358"]`
+    - Geographic bounding box for the FEDS dataset query, formatted as: [top left longitude, top left latitude, bottom right longitude, bottom righ latitude] e.g. US bounding box = `["-125.0", "24.396308", "-66.93457", "49.384358"]`. For local datasets, the bounding box is interpeted as referencing a WGS84 projection (CRS = EPSG:4326). 
 - `day_search_range`: 
     - Integer x such that 0 <= x, used to search for matching reference polygons e.g. if x = 5 FEDS polygon finds an intersecting polygon, but it is 6 days difference in timestamp, it will not be included in the resulting output pairs.
 
