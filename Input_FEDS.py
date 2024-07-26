@@ -14,6 +14,7 @@ import geopandas as gpd
 import datetime as dt
 from datetime import datetime, timedelta
 from functools import singledispatch
+from shapely.geometry import box
 
 pd.set_option('display.max_columns',None)
 
@@ -66,7 +67,8 @@ class InputFEDS():
         
         # singleset up functions
         self.__set_up_master()
-        
+
+ 
     
     @property
     def units(self):
@@ -110,6 +112,85 @@ class InputFEDS():
             self.set_hard_dataset()
         else:
             raise Exception(f"Access type {self._access_type} not defined.")
+
+    def set_hard_dataset(self):
+        """ open local allfires file; load and filter based on user params. 
+            Expects self._collection to be a filepath to an allfires.parq file. 
+            Expects self._usr_start and stop to be parseable datetime strings (@TODO might not be actually) 
+        """
+        debug = True
+        
+        # @TODO update documentation to explain: 
+        # if acess type=local, title can be anything, collection needs to be 
+        # a full filepath to a specific allfires.parq file
+        # User bbox expected in format xmin, ymin, xmax, ymax w/ CRS 4326
+
+        # Requires absolute filepath in self._collection 
+        df = gpd.read_parquet(self._collection)
+        # df['index'] = df.index
+        df['t'] = df.index.get_level_values('t') 
+        df['fireID'] = df.index.get_level_values('fireID') 
+
+        if debug: 
+            print(f"Read file. {len(df)} rows")
+
+        if df.empty:
+            raise ValueError("INPUTFEDS: No FEDS results found. Please re-try with different date range/bbox region \
+            and check to make sure that the local allfires.parq file exists at the filepath entered.")
+            
+        start = pd.to_datetime(self._usr_start).to_datetime64() 
+        stop = pd.to_datetime(self._usr_stop).to_datetime64()
+        
+        # filter by time 
+        df = df[(df['t'] >= start) & (df['t'] <= stop)]
+
+        if debug:
+            print(f"Filtered by time. {len(df)} rows.")
+
+        
+        # filter by bounding box 
+        # assumes that usr_bbox is input as ["xmin", "ymin", "xmax", "ymax"] using CRS 4326
+        bbox = [float(n) for n in self._usr_bbox] # assure strings -> floats
+        bbox = gpd.GeoDataFrame([0], geometry=[box(*bbox)], crs="EPSG:4326") # unpack bbox list into args 
+        bbox = bbox.to_crs(df.crs) 
+
+        df = df[df.geometry.within(bbox.geometry[0])]
+ 
+        if debug:
+            print(f"Filtered by bbox. {len(df)} rows.")
+
+        if self._apply_finalfire:
+            # For duplicate fires (based on mergeID or fireID?), 
+            # keep only the most recent perimeter. 
+            # assumes MultiIndex of fireID, t.
+            sorted_gdf = df.sort_index(level=['fireID', 't'], ascending=[True, False])
+            # sorted_gdf['fireID'] = sorted_gdf.index.get_level_values('fireID') 
+            df = sorted_gdf.drop_duplicates(subset='fireID', keep='first')
+
+        if debug:
+            print(f"Dropped all but final fires. {len(df)} rows")
+
+        if debug:
+            print(f"Current CRS: {df.crs.name} \n Reprojecting to: {self._crs}")
+            
+        df = df.to_crs(self._crs) 
+        if debug:
+            print("Converted crs." )
+
+
+        # convert to match API results 
+        # t (timestamp) -> str '2019-07-01T00:00:00'
+        df['t'] = df['t'].dt.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        df = df.reset_index(drop=True)
+        
+        # set as needed for access in Output_Calculation 
+        df['index'] = df.index
+        df['geometry'] = df.hull
+   
+        self._polygons = df
+        
+        return self
     
     # API DATA ACCESS HELPERS
     def __set_api_url(self):
