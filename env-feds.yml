@@ -1,4 +1,4 @@
-name: /projects/env-feds
+name: env-feds
 channels:
   - conda-forge
   - defaults
