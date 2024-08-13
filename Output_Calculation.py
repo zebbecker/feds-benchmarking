@@ -459,11 +459,34 @@ class OutputCalculation:
                 possible_matches_index = list(curr_feds_sindex.intersection(tmp_bbox))
                 possible_matches = curr_feds_poly.iloc[possible_matches_index]
                 if not possible_matches.empty:
-                    intersect = gpd.overlay(
-                        ref_polygons.iloc[[idx]], possible_matches, how="intersection"
+
+                    print(f"Len possible matches: {len(possible_matches)}")
+                    print(
+                        f"Len ref_polygons.iloc[[idx]]: {len(ref_polygons.iloc[[idx]])}"
                     )
+                    print(
+                        f"Feds index = {feds_poly_i} Ref index: {idx} Possible matches index: {possible_matches_index}"
+                    )
+
+                    try:
+                        intersect = gpd.overlay(
+                            ref_polygons.iloc[[idx]],
+                            possible_matches,
+                            how="intersection",
+                        )
+                    except KeyError as e:
+                        print(
+                            f"KeyError. No intersection at feds {feds_poly_i} and ref {idx}"
+                        )
+                        intersect = gpd.GeoDataFrame()
                     if not intersect.empty:
                         curr_finds.append(idx)
+
+                    # intersect = gpd.overlay(
+                    #     ref_polygons.iloc[[idx]], possible_matches, how="intersection"
+                    # )
+                    # if not intersect.empty:
+                    #     curr_finds.append(idx)
 
             if not len(curr_finds):
                 # debug warnings
