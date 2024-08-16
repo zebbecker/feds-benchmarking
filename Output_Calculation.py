@@ -176,7 +176,9 @@ class OutputCalculation:
 
         # Initialize Dask LocalCluster for parallel processing
         client = Client(n_workers=8, threads_per_worker=1)
-
+        print(
+            f"Started Dask cluster. Scheduler dash board available at {client.dashboard_link}"
+        )
         # feds polygon index mapping to reference index of closest type (or None)
         index_pairs = OutputCalculation.closest_date_match(self, client)
 
