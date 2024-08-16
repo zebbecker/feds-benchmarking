@@ -20,7 +20,6 @@ import rasterio
 import rioxarray as rio
 import matplotlib.pyplot as plt
 import pyproj
-import dask
 
 from dask.distributed import Client
 from tqdm import tqdm
@@ -174,11 +173,15 @@ class OutputCalculation:
 
     def __run_calculations(self):
         """orchestrate all calculations; either return back to enable output write or write here"""
+
+        # Initialize Dask LocalCluster for parallel processing
+        client = Client(n_workers=8, threads_per_worker=1)
+
         # feds polygon index mapping to reference index of closest type (or None)
-        index_pairs = OutputCalculation.closest_date_match(self)
+        index_pairs = OutputCalculation.closest_date_match(self, client)
 
         calculations = {
-            "index_pairs": index_pairs,
+            "index_pairs": [],
             "ratio": [],
             "accuracy": [],
             "precision": [],
@@ -188,50 +191,58 @@ class OutputCalculation:
             "symm_ratio": [],
         }
 
-        for (
-            feds_ref_pair
-        ) in (
-            index_pairs
-        ):  # e.g. (4, 1) <- feds index 4 best matches with ref poly at index 1
+        futures = []
 
-            skip_first_key = True
+        try:
+            for feds_ref_pair in index_pairs:
+                # (e.g. (4, 1) <- feds index 4 best matches with ref poly at index 1
 
-            # no reference polygon --> attach none to tracked calculations
-            if feds_ref_pair[1] is None:
-                for key in calculations:
-                    if skip_first_key:
-                        skip_first_key = False
-                        continue  # Skip the first key
-                    calculations[key].append(None)
-                continue
+                if feds_ref_pair[1] is None:
+                    # no reference polygon --> attach none to tracked calculations
+                    for key in calculations:
+                        if key == "index_pairs":
+                            calculations[key].append(feds_ref_pair)
+                        else:
+                            calculations[key].append(None)
+                    continue
 
-            # fetch corresponding polygons
-            feds_poly = self._feds_input.polygons[
-                self._feds_input.polygons["index"] == feds_ref_pair[0]
-            ]
-            ref_poly = self._ref_input.polygons[
-                self._ref_input.polygons["index"] == feds_ref_pair[1]
-            ]
+                # else, process area calculations
+                feds_poly = self._feds_input.polygons[
+                    self._feds_input.polygons["index"] == feds_ref_pair[0]
+                ]
+                ref_poly = self._ref_input.polygons[
+                    self._ref_input.polygons["index"] == feds_ref_pair[1]
+                ]
+                # submit to Dask cluster
+                futures.append(
+                    client.submit(
+                        OutputCalculation.pair_stats_calculations,
+                        feds_poly,
+                        ref_poly,
+                        feds_ref_pair,
+                    )
+                )
 
-            # run through calculations
-            ratio = OutputCalculation.ratioCalculation(feds_poly, ref_poly)
-            accuracy = OutputCalculation.accuracyCalculation(feds_poly, ref_poly)
-            precision = OutputCalculation.precisionCalculation(feds_poly, ref_poly)
-            recall = OutputCalculation.recallCalculation(feds_poly, ref_poly)
-            iou = OutputCalculation.IOUCalculation(feds_poly, ref_poly)
-            f1 = OutputCalculation.f1ScoreCalculation(feds_poly, ref_poly)
-            symm_ratio = OutputCalculation.symmDiffRatioCalculation(
-                feds_poly, ref_poly
-            )  # indep calc
+            # block for results
+            results = client.gather(futures)
 
-            # add to tracking arr
-            calculations["ratio"].append(ratio)
-            calculations["accuracy"].append(accuracy)
-            calculations["precision"].append(precision)
-            calculations["recall"].append(recall)
-            calculations["iou"].append(iou)
-            calculations["f1"].append(f1)
-            calculations["symm_ratio"].append(symm_ratio)
+        except Exception as e:
+            # exit gracefully
+            client.close()
+            raise e
+
+        client.close()
+
+        # aggregate individual dicts into calculations
+        for r in results:
+            calculations["index_pairs"].append(r["index_pair"])
+            calculations["ratio"].append(r["ratio"])
+            calculations["accuracy"].append(r["accuracy"])
+            calculations["precision"].append(r["precision"])
+            calculations["recall"].append(r["recall"])
+            calculations["iou"].append(r["iou"])
+            calculations["f1"].append(r["f1"])
+            calculations["symm_ratio"].append(r["symm_ratio"])
 
         # verify same sizing
         for key in calculations:
@@ -418,25 +429,11 @@ class OutputCalculation:
 
         return finalized
 
-    """
-    Plan: 
-    - pull out match one feds poly into helper function 
-    OutputCalculation.match_one_feds_poly(feds_poly: polygon, feds_poly_index: int, 
-    ref_polygons: geodataframe) -> list
-    - swap in to old closest date match and test/debug 
-    - add calc_in_parallel param to constructor, default false 
-    - create closest_date_match_parallel:
-        distributed_ref_polygons = client.scatter(self._ref_polygons)
-        for f in feds poly: 
-            task = dask.delayed(match_one_feds_poly(distributed_ref_poly))
-        (maybe this could all be done in client.map)
-        matches = client.gather(tasks)
-    """
-
-    def closest_date_match(self) -> list:
+    def closest_date_match(self, client) -> list:
         """
         Given feds and reference polygons, return a list
         mapping the feds inputs to any nearby reference polygons.
+        The reference polygon may be None if no match is found.
 
         [(feds_poly_index, ref_poly_index), (feds_poly_index, None)]
         """
@@ -448,24 +445,21 @@ class OutputCalculation:
             f"Number of total ref_polygons: {len(self._ref_input.polygons.index)}"
         )
 
-        client = Client()  # initialize Dask local cluster
-
-        # do match one polygon in parallel
-        results = None
-
         total_iterations = self._feds_input.polygons.shape[0]
         day_search_range = self._day_search_range
 
-        # will break things if both gdfs are so big they don't fit in each worker's memory
+        # broadcast=True copies full gdf into memory on each worker;
+        # reduces network overhead during computation, but needs each worker to
+        # have sufficient memory
         feds_polygons = client.scatter(self._feds_input.polygons, broadcast=True)
         ref_polygons = client.scatter(self._ref_input.polygons, broadcast=True)
 
-        # Submit tasks to Dask workers for parallel processing
+        # Submit tasks to Dask workers for parallel processing.
         # searching for reference polygon matches for one feds polygon == one task
         try:
             futures = [
                 client.submit(
-                    match_one_feds_poly,
+                    OutputCalculation.match_one_feds_poly,
                     feds_polygons,
                     i,
                     ref_polygons,
@@ -473,182 +467,19 @@ class OutputCalculation:
                 )
                 for i in range(total_iterations)
             ]
+            # block on results
             results = client.gather(futures)
         except Exception as e:
             client.close()
             raise e
 
-        client.close()
-
         # flatten list of lists
         # store as (feds_poly index, ref_polygon index)
         matches = [match for sublist in results for match in sublist]
 
         print("DATE MATCHING COMPLETE")
-        num_matches = 0
-        for m in matches:
-            if m[1]:
-                num_matches += 1
-        print(f"{num_matches} matches found.")
+
         return matches
-
-    def closest_date_match_old(self) -> list:
-        """
-        Given feds and reference polygons, return
-        a list mapping the feds input to the closest reference polygons.
-
-        [(feds_poly_index, ref_poly_index), (feds_poly_index, None)]
-        """
-
-        matches = []
-
-        feds_polygons = self._feds_input.polygons
-        ref_polygons = self._ref_input.polygons
-
-        logging.info(
-            f"Number of total feds_polygons: {len(self._feds_input.polygons.index)}"
-        )
-        logging.info(
-            f"Number of total ref_polygons: {len(self._ref_input.polygons.index)}"
-        )
-
-        total_iterations = feds_polygons.shape[0]
-
-        results = []
-
-        for feds_poly_i in tqdm(
-            range(total_iterations),
-            desc="Running FEDS-Reference Match Algorithm",
-            unit="polygon",
-        ):
-            curr_feds_poly = feds_polygons.iloc[[feds_poly_i]]
-
-            results.append(
-                self.match_one_feds_poly(
-                    curr_feds_poly,
-                    feds_poly_i,
-                    ref_polygons,
-                    self._day_search_range,
-                )
-            )
-
-        # flatten list of lists
-        # store as (feds_poly index, ref_polygon index)
-        matches = [match for sublist in results for match in sublist]
-
-        print("DATE MATCHING COMPLETE")
-        num_matches = 0
-        for m in matches:
-            if m[1]:
-                num_matches += 1
-        print(f"{num_matches} matches found.")
-        return matches
-
-    def old_match_one_feds_poly(
-        self, feds_poly, feds_poly_i: int, ref_polygons, day_search_range: int
-    ) -> list:
-        """
-        Given one feds polygon and a geodataframe of reference polygons,
-        return possible matches with
-        reference polygons.
-
-        feds_poly: geodataframe with one row, the current feds polygon to match
-        feds_poly_i: integer index of feds_poly in input feds polygons gdf
-            only used in error messages
-        ref_polygons: geodataframe of reference polygons
-        day_search_range:
-
-
-        Returns a list of one or more matches.
-        Reference index may be None if no matches are found.
-        Possible return formats:
-        [(feds_poly index, ref_poly index)]
-        [(f, r), (f, r), (f, r)]
-        [(f, None)]
-        """
-
-        feds_poly_sindex = feds_poly.sindex
-
-        # indices of refs that intersected with this feds poly
-        curr_finds = []
-
-        # PHASE 1: FIND INTERSECTIONS OF ANY KIND
-        for idx in range(len(ref_polygons)):
-            ref_poly = ref_polygons.iloc[idx]
-            tmp_bbox = ref_poly.geometry.bounds
-            possible_matches_index = list(feds_poly_sindex.intersection(tmp_bbox))
-            possible_matches = feds_poly.iloc[possible_matches_index]
-
-            if not possible_matches.empty:
-                try:
-                    intersect = gpd.overlay(
-                        ref_polygons.iloc[[idx]],
-                        possible_matches,
-                        how="intersection",
-                    )
-                except KeyError as e:
-                    print(
-                        f"KeyError. No intersection at feds {feds_poly_i} and ref {idx}"
-                    )
-                    intersect = gpd.GeoDataFrame()
-                if not intersect.empty:
-                    curr_finds.append(idx)
-
-        if not len(curr_finds):
-            # debug warnings
-            # logging.warning(f'NO MATCHES FOUND FOR FEDS_POLYGON AT INDEX: {feds_polygons["index"].iloc[feds_poly_i]}; UNABLE TO FIND BEST DATE MATCHES, ATTACHING NONE FOR REFERENCE INDEX')
-            # @TODO cleanup indexing, this is confusing
-            return [(feds_poly.iloc[0]["index"], None)]
-
-        # feds time stamp - 2023-09-22T12:00:00 in str format
-        timestamp = feds_poly.t
-        set_up_finds = ref_polygons.take(curr_finds)
-
-        # PHASE 2: GET BEST TIME STAMP SET, TEST IF INTERSECTIONS FIT THIS BEST DATE
-        try:
-            timestamp = datetime.strptime(timestamp.values[0], "%Y-%m-%dT%H:%M:%S")
-            time_matches = OutputCalculation.get_nearest_by_date(
-                set_up_finds, timestamp, day_search_range
-            )
-        except Exception as e:
-            sys.stdout.write(
-                f"Encountered error when running get_nearest_by_date: {e} \n"
-            )
-            sys.stdout.flush()
-            sys.stdout.write(
-                f'DUE TO ERR: FEDS POLY WITH INDEX {feds_poly["index"]} HAS NO INTERSECTIONS AT BEST DATES: ATTACHING NONE FOR REFERENCE INDEX \n'
-            )
-            sys.stdout.flush()
-            return [(feds_poly.iloc[0]["index"], None)]
-
-        if time_matches is None:
-            sys.stdout.write(
-                f"TIME MATCH WARNING: the intersecting pair does not have a timestamp difference within the specified day search range window: {self._day_search_range} \n"
-            )
-            sys.stdout.flush()
-            sys.stdout.write(
-                f"Intersection pair will still be included for user inspection; FEDS at index {feds_poly_i} and Reference at index {curr_finds}. \n"
-            )
-            sys.stdout.flush()
-
-            time_matches = set_up_finds
-
-        # PHASE 3: FLATTEN TIME MATCHES + INTERSECTING
-        intersect_and_date = [
-            time_matches.iloc[[indx]]["index"].values[0]
-            for indx in range(time_matches.shape[0])
-        ]
-        assert (
-            len(intersect_and_date) != 0
-        ), "FATAL: len 0 should not occur with the intersect + best date array"
-        # if len(intersect_and_date) > 1:
-        #     sys.stdout.write(f'FEDS polygon at index {feds_polygons["index"].iloc[feds_poly_i]} has MULTIPLE qualifying polygons to compare against: {len(intersect_and_date)} resulted. Select first polygon only; SUBJECT TO CHANGE! \n')
-        #     sys.stdout.flush()
-
-        # multi match supressor
-        # [matches.append((feds_polygons['index'].iloc[feds_poly_i], a_match)) for a_match in intersect_and_date[0:1]]
-        # print([(feds_poly["index"], a_match) for a_match in intersect_and_date])
-        return [(feds_poly.iloc[0]["index"], a_match) for a_match in intersect_and_date]
 
     # TIF READING AND PROCESSING
 
@@ -1347,109 +1178,146 @@ class OutputCalculation:
 
         return symmDiff_ratio
 
+    @staticmethod
+    def pair_stats_calculations(feds_poly, ref_poly, feds_ref_pair) -> dict:
+        """
+        Given one feds poly and one ref poly, orchestrates calculations for
+        various spatial statistics.
 
-def match_one_feds_poly(
-    feds_polygons, feds_poly_i: int, ref_polygons, day_search_range: int
-) -> list:
-    """
-    Given one feds polygon and a geodataframe of reference polygons,
-    return possible matches with
-    reference polygons.
-
-    feds_polygons: geodataframe of feds polygons
-    feds_poly_i: integer index of specific feds polygon to match
-    ref_polygons: geodataframe of reference polygons
-    day_search_range: if difference between feds and ref polygon
-    exceeds this int, warning will be given.
-
-
-    Returns a list of one or more matches.
-    Reference index may be None if no matches are found.
-    Possible return formats:
-    [(feds_poly index, ref_poly index)]
-    [(f, r), (f, r), (f, r)]
-    [(f, None)]
-
-    Note: this can't be a class method, because when we try to
-    run this function in parallel many times, Dask will try to serialize
-    the class each time and send it with every function call.
-    """
-    feds_poly = feds_polygons.iloc[[feds_poly_i]]
-    feds_poly_sindex = feds_poly.sindex
-
-    # indices of refs that intersected with this feds poly
-    curr_finds = []
-
-    # PHASE 1: FIND INTERSECTIONS OF ANY KIND
-    for idx in range(len(ref_polygons)):
-        ref_poly = ref_polygons.iloc[idx]
-        tmp_bbox = ref_poly.geometry.bounds
-        possible_matches_index = list(feds_poly_sindex.intersection(tmp_bbox))
-        possible_matches = feds_poly.iloc[possible_matches_index]
-
-        if not possible_matches.empty:
-            try:
-                intersect = gpd.overlay(
-                    ref_polygons.iloc[[idx]],
-                    possible_matches,
-                    how="intersection",
-                )
-            except KeyError as e:
-                print(f"KeyError. No intersection at feds {feds_poly_i} and ref {idx}")
-                intersect = gpd.GeoDataFrame()
-            if not intersect.empty:
-                curr_finds.append(idx)
-
-    if not len(curr_finds):
-        # debug warnings
-        # logging.warning(f'NO MATCHES FOUND FOR FEDS_POLYGON AT INDEX: {feds_polygons["index"].iloc[feds_poly_i]}; UNABLE TO FIND BEST DATE MATCHES, ATTACHING NONE FOR REFERENCE INDEX')
-        # @TODO cleanup indexing, this is confusing
-        return [(feds_poly.iloc[0]["index"], None)]
-
-    # feds time stamp - 2023-09-22T12:00:00 in str format
-    timestamp = feds_poly.t
-    set_up_finds = ref_polygons.take(curr_finds)
-
-    # PHASE 2: GET BEST TIME STAMP SET, TEST IF INTERSECTIONS FIT THIS BEST DATE
-    try:
-        timestamp = datetime.strptime(timestamp.values[0], "%Y-%m-%dT%H:%M:%S")
-        time_matches = OutputCalculation.get_nearest_by_date(
-            set_up_finds, timestamp, day_search_range
+        Returns a dict:
+        {
+            "index_pair": (1, 13)
+            "ratio": 0.1
+            "accuracy": 0.2
+            etc.
+        }
+        """
+        calculations = {}
+        calculations["index_pair"] = feds_ref_pair
+        # run through calculations
+        calculations["ratio"] = OutputCalculation.ratioCalculation(feds_poly, ref_poly)
+        calculations["accuracy"] = OutputCalculation.accuracyCalculation(
+            feds_poly, ref_poly
         )
-    except Exception as e:
-        sys.stdout.write(f"Encountered error when running get_nearest_by_date: {e} \n")
-        sys.stdout.flush()
-        sys.stdout.write(
-            f'DUE TO ERR: FEDS POLY WITH INDEX {feds_poly["index"]} HAS NO INTERSECTIONS AT BEST DATES: ATTACHING NONE FOR REFERENCE INDEX \n'
+        calculations["precision"] = OutputCalculation.precisionCalculation(
+            feds_poly, ref_poly
         )
-        sys.stdout.flush()
-        return [(feds_poly.iloc[0]["index"], None)]
-
-    if time_matches is None:
-        sys.stdout.write(
-            f"TIME MATCH WARNING: the intersecting pair does not have a timestamp difference within the specified day search range window: {day_search_range} \n"
+        calculations["recall"] = OutputCalculation.recallCalculation(
+            feds_poly, ref_poly
         )
-        sys.stdout.flush()
-        sys.stdout.write(
-            f"Intersection pair will still be included for user inspection; FEDS at index {feds_poly_i} and Reference at index {curr_finds}. \n"
-        )
-        sys.stdout.flush()
+        calculations["iou"] = OutputCalculation.IOUCalculation(feds_poly, ref_poly)
+        calculations["f1"] = OutputCalculation.f1ScoreCalculation(feds_poly, ref_poly)
+        calculations["symm_ratio"] = OutputCalculation.symmDiffRatioCalculation(
+            feds_poly, ref_poly
+        )  # indep calc
 
-        time_matches = set_up_finds
+        return calculations
 
-    # PHASE 3: FLATTEN TIME MATCHES + INTERSECTING
-    intersect_and_date = [
-        time_matches.iloc[[indx]]["index"].values[0]
-        for indx in range(time_matches.shape[0])
-    ]
-    assert (
-        len(intersect_and_date) != 0
-    ), "FATAL: len 0 should not occur with the intersect + best date array"
-    # if len(intersect_and_date) > 1:
-    #     sys.stdout.write(f'FEDS polygon at index {feds_polygons["index"].iloc[feds_poly_i]} has MULTIPLE qualifying polygons to compare against: {len(intersect_and_date)} resulted. Select first polygon only; SUBJECT TO CHANGE! \n')
-    #     sys.stdout.flush()
+    @staticmethod
+    def match_one_feds_poly(
+        feds_polygons, feds_poly_i: int, ref_polygons, day_search_range: int
+    ) -> list:
+        """
+        Given one feds polygon and a geodataframe of reference polygons,
+        return possible matches with reference polygons.
 
-    # multi match supressor
-    # [matches.append((feds_polygons['index'].iloc[feds_poly_i], a_match)) for a_match in intersect_and_date[0:1]]
-    # print([(feds_poly["index"], a_match) for a_match in intersect_and_date])
-    return [(feds_poly.iloc[0]["index"], a_match) for a_match in intersect_and_date]
+        feds_polygons: geodataframe of feds polygons
+        feds_poly_i: integer index of specific feds polygon to match
+        ref_polygons: geodataframe of reference polygons
+        day_search_range: if difference between feds and ref polygon
+        exceeds this int, warning will be given.
+
+
+        Returns a list of one or more matches.
+        Reference index may be None if no matches are found.
+        Possible return formats:
+        [(feds_poly index, ref_poly index)]
+        [(f, r), (f, r), (f, r)]
+        [(f, None)]
+
+        Note: must be static method so Dask will not try to serialize
+        the class each time and send it with every function call.
+        """
+        feds_poly = feds_polygons.iloc[[feds_poly_i]]
+        feds_poly_sindex = feds_poly.sindex
+
+        # indices of refs that intersected with this feds poly
+        curr_finds = []
+
+        # PHASE 1: FIND INTERSECTIONS OF ANY KIND
+        for idx in range(len(ref_polygons)):
+            ref_poly = ref_polygons.iloc[idx]
+            tmp_bbox = ref_poly.geometry.bounds
+            possible_matches_index = list(feds_poly_sindex.intersection(tmp_bbox))
+            possible_matches = feds_poly.iloc[possible_matches_index]
+
+            if not possible_matches.empty:
+                try:
+                    intersect = gpd.overlay(
+                        ref_polygons.iloc[[idx]],
+                        possible_matches,
+                        how="intersection",
+                    )
+                except KeyError as e:
+                    print(
+                        f"KeyError. No intersection at feds {feds_poly_i} and ref {idx}"
+                    )
+                    intersect = gpd.GeoDataFrame()
+                if not intersect.empty:
+                    curr_finds.append(idx)
+
+        if not len(curr_finds):
+            # debug warnings
+            # logging.warning(f'NO MATCHES FOUND FOR FEDS_POLYGON AT INDEX: {feds_polygons["index"].iloc[feds_poly_i]}; UNABLE TO FIND BEST DATE MATCHES, ATTACHING NONE FOR REFERENCE INDEX')
+            # @TODO cleanup indexing, this is confusing
+            return [(feds_poly.iloc[0]["index"], None)]
+
+        # feds time stamp - 2023-09-22T12:00:00 in str format
+        timestamp = feds_poly.t
+        set_up_finds = ref_polygons.take(curr_finds)
+
+        # PHASE 2: GET BEST TIME STAMP SET, TEST IF INTERSECTIONS FIT THIS BEST DATE
+        try:
+            timestamp = datetime.strptime(timestamp.values[0], "%Y-%m-%dT%H:%M:%S")
+            time_matches = OutputCalculation.get_nearest_by_date(
+                set_up_finds, timestamp, day_search_range
+            )
+        except Exception as e:
+            sys.stdout.write(
+                f"Encountered error when running get_nearest_by_date: {e} \n"
+            )
+            sys.stdout.flush()
+            sys.stdout.write(
+                f'DUE TO ERR: FEDS POLY WITH INDEX {feds_poly["index"]} HAS NO INTERSECTIONS AT BEST DATES: ATTACHING NONE FOR REFERENCE INDEX \n'
+            )
+            sys.stdout.flush()
+            return [(feds_poly.iloc[0]["index"], None)]
+
+        if time_matches is None:
+            sys.stdout.write(
+                f"TIME MATCH WARNING: the intersecting pair does not have a timestamp difference within the specified day search range window: {day_search_range} \n"
+            )
+            sys.stdout.flush()
+            sys.stdout.write(
+                f"Intersection pair will still be included for user inspection; FEDS at index {feds_poly_i} and Reference at index {curr_finds}. \n"
+            )
+            sys.stdout.flush()
+
+            time_matches = set_up_finds
+
+        # PHASE 3: FLATTEN TIME MATCHES + INTERSECTING
+        intersect_and_date = [
+            time_matches.iloc[[indx]]["index"].values[0]
+            for indx in range(time_matches.shape[0])
+        ]
+        assert (
+            len(intersect_and_date) != 0
+        ), "FATAL: len 0 should not occur with the intersect + best date array"
+        # if len(intersect_and_date) > 1:
+        #     sys.stdout.write(f'FEDS polygon at index {feds_polygons["index"].iloc[feds_poly_i]} has MULTIPLE qualifying polygons to compare against: {len(intersect_and_date)} resulted. Select first polygon only; SUBJECT TO CHANGE! \n')
+        #     sys.stdout.flush()
+
+        # multi match supressor
+        # [matches.append((feds_polygons['index'].iloc[feds_poly_i], a_match)) for a_match in intersect_and_date[0:1]]
+        # print([(feds_poly["index"], a_match) for a_match in intersect_and_date])
+        return [(feds_poly.iloc[0]["index"], a_match) for a_match in intersect_and_date]
