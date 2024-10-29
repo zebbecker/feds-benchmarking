@@ -163,18 +163,20 @@ class InputReference():
             users are welcome to modify/remove filters at their own discretion
         """
         try:
+            # try local first, then s3
             df = gpd.read_file(self._ds_url)
+  
         except Exception as e:
-            pass
-        try:
-            fs = fsspec.filesystem("s3")
-            with fs.open(InputReference.URL_MAPS[self._title][2]) as f:
-                df = gpd.GeoDataFrame.from_file(f)
-            
-            # df = gpd.read_file(InputReference.URL_MAPS[self._title][2], config=config)
-        except IOError as io_err:
-            logging.error(f"ERR: unable to read local shp from url: {self._ds_url} and {InputReference.URL_MAPS[self._title][2]}, produced error: {io_err}")
-            sys.exit()
+            logging.error(e)
+            try:
+                fs = fsspec.filesystem("s3")
+                with fs.open(InputReference.URL_MAPS[self._title][2]) as f:
+                    df = gpd.GeoDataFrame.from_file(f)
+                
+                # df = gpd.read_file(InputReference.URL_MAPS[self._title][2], config=config)
+            except IOError as io_err:
+                logging.error(f"ERR: unable to read local shp from url: {self._ds_url} and {InputReference.URL_MAPS[self._title][2]}, produced error: {io_err}")
+                sys.exit()
         
         # filter based on predfined conds 
         if self._title == "Downloaded_InterAgencyFirePerimeterHistory_All_Years_View" or self._title == "InterAgencyFirePerimeterHistory_All_Years_View":
@@ -338,13 +340,13 @@ class InputReference():
         df_year = df_date.year
         
         # crs management
-        gdf = gdf.set_crs(4326, allow_override=True)
-        df = gdf.to_crs(self._crs)
+        df = df.set_crs(4326, allow_override=True)
+        df = df.to_crs(self._crs)
         
         # geom validity
         df['is_valid_geometry'] = df['geometry'].is_valid
-        df = gdf[df['is_valid_geometry'] == True]
-        df = gdf[df.geometry != None]
+        df = df[df['is_valid_geometry'] == True]
+        df = df[df.geometry != None]
         
         # time parse + mapping
         time_col_name = self._custom_col_assign["time"]
