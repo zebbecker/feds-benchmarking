@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import pyproj
 
 from dask.distributed import Client
+from dask_gateway import GatewayCluster, Gateway
 from tqdm import tqdm
 from pyproj import CRS
 from owslib.ogcapi.features import Features
@@ -174,8 +175,22 @@ class OutputCalculation:
     def __run_calculations(self):
         """orchestrate all calculations; either return back to enable output write or write here"""
 
-        # Initialize Dask LocalCluster for parallel processing
-        client = Client(n_workers=8, threads_per_worker=1)
+        # try to access a Gateway cluster if one is available: otherwise, start a local cluster
+        try:
+            gateway = Gateway()
+            clusters = gateway.list_clusters()
+            if clusters:
+                cluster = gateway.connect(clusters[0].name)
+            else:
+                cluster = GatewayCluster(shutdown_on_close=True)
+
+            # cluster.scale(16)
+            cluster.adapt(minimum=0, maximum=16)
+            client = cluster.get_client()
+        except ValueError:
+            # Gateway constructor will throw value error if there is no configured gateway available
+            client = Client(n_workers=8, threads_per_worker=1)
+
         print(
             f"Started Dask cluster. Scheduler dash board available at {client.dashboard_link}"
         )
